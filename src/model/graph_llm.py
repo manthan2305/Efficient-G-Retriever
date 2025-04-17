@@ -4,6 +4,7 @@ import torch.nn as nn
 from torch.cuda.amp import autocast as autocast
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from torch_scatter import scatter
+import torch.nn.functional as F
 from src.model.gnn import load_gnn_model
 from peft import (
     LoraConfig,
@@ -17,6 +18,58 @@ EOS = '</s>'
 
 IGNORE_INDEX = -100
 
+class MultiHeadAttentionPooling(nn.Module):
+    def __init__(self, hidden_dim, num_heads, device):
+        super().__init__()
+        self.num_heads = num_heads
+        self.attentions = nn.ModuleList([nn.Linear(hidden_dim, 1) for _ in range(num_heads)])
+        self.device = device
+        self.to(device)
+
+    def forward(self, node_embeds, batch):
+        node_embeds = node_embeds.to(self.device)
+        batch = batch.to(self.device)
+
+        all_graph_embeds = []
+        for attention in self.attentions:
+            attn_scores = attention(node_embeds).squeeze(-1)
+            attn_scores = attn_scores - scatter(attn_scores, batch, dim=0, reduce='max')[batch]
+            attn_scores = attn_scores.exp()
+            attn_scores = attn_scores / (scatter(attn_scores, batch, dim=0, reduce='sum')[batch] + 1e-9)
+            attn_scores = attn_scores.unsqueeze(-1)
+
+            graph_embeds = scatter(node_embeds * attn_scores, batch, dim=0, reduce='sum')
+            all_graph_embeds.append(graph_embeds)
+
+        # Concatenate all head outputs
+        graph_embeds = torch.cat(all_graph_embeds, dim=-1)
+        return graph_embeds
+
+class AttentionPooling(nn.Module):
+    def __init__(self, hidden_dim, device):
+        super().__init__()
+        self.attention = nn.Linear(hidden_dim, 1)
+        self.device = device
+        self.to(device)
+
+    def forward(self, node_embeds, batch):
+        # Ensure inputs are on the correct device
+        node_embeds = node_embeds.to(self.device)
+        batch = batch.to(self.device)
+
+        # Compute attention scores
+        attn_scores = self.attention(node_embeds).squeeze(-1)
+        
+        # Compute softmax within each graph
+        attn_scores = attn_scores - scatter(attn_scores, batch, dim=0, reduce='max')[batch]
+        attn_scores = attn_scores.exp()
+        attn_scores = attn_scores / (scatter(attn_scores, batch, dim=0, reduce='sum')[batch] + 1e-9)
+        attn_scores = attn_scores.unsqueeze(-1)
+
+        # Weighted sum of node embeddings
+        graph_embeds = scatter(node_embeds * attn_scores, batch, dim=0, reduce='sum')
+
+        return graph_embeds
 
 class GraphLLM(torch.nn.Module):
 
@@ -31,7 +84,7 @@ class GraphLLM(torch.nn.Module):
 
         print('Loading LLAMA')
         kwargs = {
-            "max_memory": {0: '80GiB', 1: '80GiB'},
+                "max_memory": {0: '40GiB', 1: '40GiB',  2: '40GiB',  3: '40GiB'},
             "device_map": "auto",
             "revision": "main",
         }
@@ -71,6 +124,9 @@ class GraphLLM(torch.nn.Module):
             )
             model = get_peft_model(model, config)
 
+            # Reducing memory usage by recomputing certain gradients during backprop
+            model.gradient_checkpointing_enable()
+
         self.model = model
         print('Finish loading LLAMA!')
 
@@ -84,9 +140,10 @@ class GraphLLM(torch.nn.Module):
         ).to(self.model.device)
 
         self.projector = nn.Sequential(
-            nn.Linear(args.gnn_hidden_dim, 2048),
-            nn.Sigmoid(),
-            nn.Linear(2048, 4096),
+            nn.Linear(4096, 8192),
+            nn.GELU(),                                  # Replace with sigmoid
+            nn.LayerNorm(8192),                         # Added New LayerNorm
+            nn.Linear(8192, 4096),
         ).to(self.model.device)
 
         self.word_embedding = self.model.model.get_input_embeddings()
@@ -108,10 +165,27 @@ class GraphLLM(torch.nn.Module):
     def encode_graphs(self, samples):
         graphs = samples['graph']
         graphs = graphs.to(self.model.device)
-        n_embeds, _ = self.graph_encoder(graphs.x, graphs.edge_index.long(), graphs.edge_attr)
+        # n_embeds, _ = self.graph_encoder(graphs.x, graphs.edge_index.long(), graphs.edge_attr)
+        n_embeds, e_embeds = self.graph_encoder(graphs.x, graphs.edge_index.long(), graphs.edge_attr)   # consider node and edge embeddings
 
         # mean pooling
-        g_embeds = scatter(n_embeds, graphs.batch, dim=0, reduce='mean')
+        # g_embeds = scatter(n_embeds, graphs.batch, dim=0, reduce='mean')
+
+        # If e_embeds are available, we will combine
+        row, col = graphs.edge_index
+        node_edge_agg = torch.zeros_like(n_embeds)
+
+        # Aggregate incoming edge features
+        node_edge_agg.index_add_(0, row, e_embeds)
+
+        # combined node and edge features
+        combined_embeds = n_embeds + node_edge_agg
+
+        # Attention Pooling
+        if not hasattr(self, 'attention_pool'):         # Initialize attention pooling layer once
+            self.attention_pool = MultiHeadAttentionPooling(hidden_dim=combined_embeds.size(-1), num_heads=4, device=self.model.device)
+            
+        g_embeds = self.attention_pool(combined_embeds, graphs.batch)
 
         return g_embeds
 

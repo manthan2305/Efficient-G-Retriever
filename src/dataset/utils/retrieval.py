@@ -2,7 +2,86 @@ import torch
 import numpy as np
 from pcst_fast import pcst_fast
 from torch_geometric.data.data import Data
+from torch.nn.functional import cosine_similarity
 
+def retrieval_via_attention(graph, q_emb, textual_nodes, textual_edges, topk=3, topk_e=3, threshold_node=None, threshold_edge=None):
+    
+    # If no textual descriptions, return original graph and its description.
+    if len(textual_nodes) == 0 or len(textual_edges) == 0:
+        desc = textual_nodes.to_csv(index=False) + '\n' + \
+               textual_edges.to_csv(index=False, columns=['src', 'edge_attr', 'dst'])
+        graph = Data(x=graph.x, edge_index=graph.edge_index, edge_attr=graph.edge_attr, num_nodes=graph.num_nodes)
+        return graph, desc
+    
+    # Compute node attention scores using cosine similarity between q_emb and node features.
+    node_scores = cosine_similarity(q_emb, graph.x)  # shape: (num_nodes,)
+    
+    # Select nodes based on threshold or topk selection.
+    if threshold_node is None:
+        topk = min(topk, graph.num_nodes)
+        _, topk_n_indices = torch.topk(node_scores, topk, largest=True)
+    else:
+        topk_n_indices = (node_scores >= threshold_node).nonzero(as_tuple=False).view(-1)
+        if topk_n_indices.numel() == 0:
+            topk = min(topk, graph.num_nodes)
+            _, topk_n_indices = torch.topk(node_scores, topk, largest=True)
+    
+    # Compute edge attention scores similarly.
+    edge_scores = cosine_similarity(q_emb, graph.edge_attr)  # shape: (num_edges,)
+    
+    if threshold_edge is None:
+        unique_edge_scores = edge_scores.unique()
+        topk_e = min(topk_e, unique_edge_scores.size(0))
+        topk_e_values, _ = torch.topk(unique_edge_scores, topk_e, largest=True)
+        # Select edges that have scores above the smallest topk_e value.
+        selected_edge_mask = edge_scores >= topk_e_values[-1]
+        topk_e_indices = selected_edge_mask.nonzero(as_tuple=False).view(-1)
+    else:
+        topk_e_indices = (edge_scores >= threshold_edge).nonzero(as_tuple=False).view(-1)
+        if topk_e_indices.numel() == 0:
+            unique_edge_scores = edge_scores.unique()
+            topk_e = min(topk_e, unique_edge_scores.size(0))
+            topk_e_values, _ = torch.topk(unique_edge_scores, topk_e, largest=True)
+            selected_edge_mask = edge_scores >= topk_e_values[-1]
+            topk_e_indices = selected_edge_mask.nonzero(as_tuple=False).view(-1)
+    
+    # Aggregate nodes that are incident to the selected high-attention edges.
+    row, col = graph.edge_index
+    selected_edge_nodes = torch.cat([row[topk_e_indices], col[topk_e_indices]]).unique()
+    
+    # Take the union of the top nodes and the nodes incident to high-attention edges.
+    selected_nodes = torch.unique(torch.cat([topk_n_indices, selected_edge_nodes]))
+    
+    # Build a set for quick lookup.
+    selected_nodes_set = set(selected_nodes.tolist())
+    
+    # Filter edges: keep those where both endpoints are in the selected set.
+    selected_edge_indices = []
+    for i in range(graph.edge_index.shape[1]):
+        u = graph.edge_index[0, i].item()
+        v = graph.edge_index[1, i].item()
+        if u in selected_nodes_set and v in selected_nodes_set:
+            selected_edge_indices.append(i)
+    selected_edge_indices = torch.tensor(selected_edge_indices, dtype=torch.long, device=graph.x.device)
+    
+    # Create textual description using selected nodes and edges.
+    n = textual_nodes.iloc[selected_nodes.cpu().numpy()]
+    e = textual_edges.iloc[selected_edge_indices.cpu().numpy()]
+    desc = n.to_csv(index=False) + '\n' + e.to_csv(index=False, columns=['src', 'edge_attr', 'dst'])
+    
+    # Remap node indices to create a contiguous subgraph.
+    mapping = {int(n): i for i, n in enumerate(selected_nodes.cpu().numpy())}
+    edge_index_sub = graph.edge_index[:, selected_edge_indices]
+    src = [mapping[int(i)] for i in edge_index_sub[0].tolist()]
+    dst = [mapping[int(i)] for i in edge_index_sub[1].tolist()]
+    edge_index_sub = torch.LongTensor([src, dst]).to(graph.x.device)
+    
+    # Construct the new subgraph Data object.
+    x_sub = graph.x[selected_nodes]
+    edge_attr_sub = graph.edge_attr[selected_edge_indices]
+    data = Data(x=x_sub, edge_index=edge_index_sub, edge_attr=edge_attr_sub, num_nodes=selected_nodes.size(0))
+    
+    return data, desc
 
 def retrieval_via_pcst(graph, q_emb, textual_nodes, textual_edges, topk=3, topk_e=3, cost_e=0.5):
     c = 0.01

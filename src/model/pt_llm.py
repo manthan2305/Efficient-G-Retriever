@@ -31,7 +31,7 @@ class PromptTuningLLM(torch.nn.Module):
 
         print('Loading LLAMA')
         kwargs = {
-            "max_memory": {0: '80GiB', 1: '80GiB'},
+            "max_memory": {0: '40GiB', 1: '40GiB',  2: '40GiB',  3: '40GiB'},
             "device_map": "auto",
             "revision": "main",
         }
@@ -70,6 +70,9 @@ class PromptTuningLLM(torch.nn.Module):
                 task_type="CAUSAL_LM",
             )
             model = get_peft_model(model, config)
+
+            # Reducing memory usage by recomputing certain gradients during backprop
+            model.gradient_checkpointing_enable()
 
         self.model = model
         print('Finish loading LLAMA!')

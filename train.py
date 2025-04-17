@@ -16,7 +16,10 @@ from src.utils.ckpt import _save_checkpoint, _reload_best_model
 from src.utils.collate import collate_fn
 from src.utils.seed import seed_everything
 from src.utils.lr_schedule import adjust_learning_rate
+from transformers import AutoModel
 
+from huggingface_hub import login
+login(token='hf_...')
 
 def main(args):
 

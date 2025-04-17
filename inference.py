@@ -12,7 +12,10 @@ from src.model import load_model, llama_model_path
 from src.dataset import load_dataset
 from src.utils.evaluate import eval_funcs
 from src.utils.collate import collate_fn
+#from transformers import AutoModel
 
+from huggingface_hub import login
+login(token='hf_...')
 
 def main(args):
 
@@ -35,6 +38,8 @@ def main(args):
     # Step 3: Build Model
     args.llm_model_path = llama_model_path[args.llm_model_name]
     model = load_model[args.model_name](graph=dataset.graph, graph_type=dataset.graph_type, args=args)
+#    access_token = "hf_..."
+#    model = AutoModel.from_pretrained("meta-llama/Llama-2-7b-hf", token=access_token)
 
     # Step 4. Evaluating
     os.makedirs(f'{args.output_dir}/{args.dataset}', exist_ok=True)
