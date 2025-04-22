@@ -120,7 +120,7 @@ Use `run.sh` to reproduce the published results.
 
 ## Citation
 
-If you use this repository, please cite the original G-Retriever paper:
+If you use this repository, please cite the original G-Retriever paper
 
 ```bibtex
 @article{he2024gretriever,
@@ -128,5 +128,14 @@ If you use this repository, please cite the original G-Retriever paper:
   author={He, Xiaoxin and Tian, Yijun and Sun, Yifei and Chawla, Nitesh V. and Laurent, Thomas and LeCun, Yann and Bresson, Xavier and Hooi, Bryan},
   journal={arXiv preprint arXiv:2402.07630},
   year={2024}
+}
+```
+
+```bibtex
+@article{solanki2025efficientgretriever,
+  title={Efficient Document Retrieval with G-Retriever},
+  author={Solanki, Manthankumar},
+  journal={arXiv preprint arXiv:2504.14955},
+  year={2025}
 }
 ```
